@@ -1,0 +1,72 @@
+package main
+
+import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
+	_ "github.com/lib/pq"
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
+	"github.com/supernova/todo-app"
+	"github.com/supernova/todo-app/pkg/handler"
+	"github.com/supernova/todo-app/pkg/repository"
+	"github.com/supernova/todo-app/pkg/service"
+)
+
+func main() {
+	logrus.SetFormatter(new(logrus.JSONFormatter))
+
+	err := initConfig() // initializing configurations
+	if err != nil {
+		logrus.Fatalf("error initializing configs: %s", err.Error())
+	}
+
+	// setting up connection with database
+	db, err := repository.NewPostgresDB(repository.Config{
+		Host:     viper.GetString("db.host"),
+		Port:     viper.GetString("db.port"),
+		Username: viper.GetString("db.username"),
+		Password: viper.GetString("db.password"),
+		DBName:   viper.GetString("db.dbname"),
+		SSLMode:  viper.GetString("db.sslmode"),
+	})
+	if err != nil {
+		logrus.Fatalf("failed to initialize db: %s", err.Error())
+	}
+
+	repos := repository.NewRepository(db)
+	services := service.NewService(repos)
+	handlers := handler.NewHandler(services)
+
+	srv := new(todo.Server)
+	go func() {
+		err = srv.Run(viper.GetString("port"), handlers.InitRoutes())
+		if err != nil {
+			logrus.Fatalf("error occured while running http server: %s", err.Error())
+		}
+	}()
+
+	logrus.Print("Todo app started")
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	<-quit
+
+	logrus.Print("Todo app shutting down")
+
+	if err := srv.Shutdown(context.Background()); err != nil {
+		logrus.Errorf("error occured on server shutting down: %s", err.Error())
+	}
+
+	if err := db.Close(); err != nil {
+		logrus.Errorf("error occured on db connection close: %s", err.Error())
+	}
+}
+
+func initConfig() error {
+	viper.AddConfigPath("configs") // set path to look for the config file
+	viper.SetConfigName("config")  // name of the config file (without extension)
+	return viper.ReadInConfig()    // find and read config file
+}
